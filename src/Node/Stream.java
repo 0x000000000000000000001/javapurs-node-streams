@@ -11,11 +11,23 @@
         public String encoding = null;
     }
 
-    public static final class WritableStream extends ReadableStream {
+    public static class WritableStream extends ReadableStream {
         public String path = null;
         public boolean finished = false;
         public boolean corked = false;
         public String defaultEncoding = null;
+
+        public void writeBytes(byte[] bytes) {
+            __append(this, bytes);
+            fire("data", encoding == null
+                ? __M$Node_Buffer.__wrap(bytes)
+                : __M$Node_Buffer.__encode(bytes, encoding));
+            fire("readable");
+        }
+
+        public void endStream() {
+            __flush(this);
+        }
     }
 
     private static void __flush(WritableStream writable) {
@@ -34,7 +46,7 @@
             return;
         }
         writable.finished = true;
-        __flush(writable);
+        writable.endStream();
         writable.fire("finish");
         writable.fire("end");
     }
@@ -56,11 +68,7 @@
             writable.fire("error", writable.error);
             return false;
         }
-        __append(writable, bytes);
-        writable.fire("data", writable.encoding == null
-            ? __M$Node_Buffer.__wrap(bytes)
-            : __M$Node_Buffer.__encode(bytes, writable.encoding));
-        writable.fire("readable");
+        writable.writeBytes(bytes);
         return true;
     }
 
