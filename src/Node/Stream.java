@@ -1,19 +1,20 @@
     // Port of Node/Stream.js. Streams carry their payload eagerly: a readable
-    // holds the bytes it would emit, a writable writes them to its target when
-    // it ends, which matches how the synchronous effects are observed.
-    public static final class ReadableStream extends __M$Node_EventEmitter.EmitterBase {
+    // exposes the bytes it holds, a writable appends to its target, and pipes
+    // are listeners on the "data"/"end" events, which keeps the synchronous
+    // effects of this backend observably ordered like the Node ones.
+    public static class ReadableStream extends __M$Node_EventEmitter.EmitterBase {
         public byte[] data = new byte[0];
         public int position = 0;
         public boolean ended = false;
         public boolean destroyed = false;
+        public Object error = null;
+        public String encoding = null;
     }
 
-    public static final class WritableStream extends __M$Node_EventEmitter.EmitterBase {
+    public static final class WritableStream extends ReadableStream {
         public String path = null;
-        public byte[] data = new byte[0];
         public boolean finished = false;
         public boolean corked = false;
-        public boolean destroyed = false;
         public String defaultEncoding = null;
     }
 
@@ -28,9 +29,14 @@
 
     private static void __finish(WritableStream writable) {
         if (writable.finished) return;
+        if (writable.error != null) {
+            writable.fire("error", writable.error);
+            return;
+        }
         writable.finished = true;
         __flush(writable);
         writable.fire("finish");
+        writable.fire("end");
     }
 
     private static void __append(WritableStream writable, byte[] bytes) {
@@ -40,16 +46,61 @@
         writable.data = joined;
     }
 
+    private static boolean __write(WritableStream writable, byte[] bytes) {
+        if (writable.error != null) {
+            writable.fire("error", writable.error);
+            return false;
+        }
+        if (writable.finished) {
+            writable.error = new RuntimeException("write after end");
+            writable.fire("error", writable.error);
+            return false;
+        }
+        __append(writable, bytes);
+        writable.fire("data", writable.encoding == null
+            ? __M$Node_Buffer.__wrap(bytes)
+            : __M$Node_Buffer.__encode(bytes, writable.encoding));
+        writable.fire("readable");
+        return true;
+    }
+
+    private static void __callback(Object callback, Object error) {
+        Object effect = ((java.util.function.Function<Object, Object>) callback).apply(error);
+        ((java.util.function.Supplier<Object>) effect).get();
+    }
+
     private static Object __chunk(ReadableStream readable, int limit) {
         if (readable.position >= readable.data.length) {
-            readable.ended = true;
-            readable.fire("end");
+            if (!readable.ended) {
+                readable.ended = true;
+                readable.fire("end");
+            }
             return null;
         }
-        int count = Math.min(limit <= 0 ? readable.data.length - readable.position : limit, readable.data.length - readable.position);
+        int available = readable.data.length - readable.position;
+        int count = limit <= 0 ? available : Math.min(limit, available);
         byte[] chunk = java.util.Arrays.copyOfRange(readable.data, readable.position, readable.position + count);
         readable.position += count;
         return __M$Node_Buffer.__wrap(chunk);
+    }
+
+    private static void __pipe(ReadableStream readable, WritableStream writable) {
+        byte[] pending = java.util.Arrays.copyOfRange(readable.data, readable.position, readable.data.length);
+        readable.position = readable.data.length;
+        if (pending.length > 0) __write(writable, pending);
+        readable.listeners.computeIfAbsent("data", key -> new java.util.concurrent.CopyOnWriteArrayList<>())
+            .add((java.util.function.Function<Object, Object>) chunk -> (java.util.function.Supplier<Object>) () -> {
+                byte[] bytes = chunk instanceof __M$Node_Buffer.NodeBuffer
+                    ? __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) chunk)
+                    : __M$Node_Buffer.__decode((String) chunk, "utf8");
+                __write(writable, bytes);
+                return null;
+            });
+        readable.listeners.computeIfAbsent("end", key -> new java.util.concurrent.CopyOnWriteArrayList<>())
+            .add((java.util.function.Function<Object, Object>) ignored -> (java.util.function.Supplier<Object>) () -> {
+                __finish(writable);
+                return null;
+            });
     }
 
     public static Object readChunkImpl = (java.util.function.Function<Object, Object>) (left) ->
@@ -69,9 +120,12 @@
         (java.util.function.Function<Object, Object>) (size) ->
             (java.util.function.Supplier<Object>) () -> __chunk((ReadableStream) readableObj, ((Number) size).intValue());
 
-    public static Object setEncodingImpl = (java.util.function.Function<Object, Object>) (readable) ->
+    public static Object setEncodingImpl = (java.util.function.Function<Object, Object>) (readableObj) ->
         (java.util.function.Function<Object, Object>) (encoding) ->
-            (java.util.function.Supplier<Object>) () -> null;
+            (java.util.function.Supplier<Object>) () -> {
+                ((ReadableStream) readableObj).encoding = (String) encoding;
+                return null;
+            };
 
     public static Object readableImpl = (java.util.function.Function<Object, Object>) (readableObj) ->
         (java.util.function.Supplier<Object>) () -> ((ReadableStream) readableObj).position < ((ReadableStream) readableObj).data.length;
@@ -97,25 +151,14 @@
     public static Object isPausedImpl = (java.util.function.Function<Object, Object>) (readable) ->
         (java.util.function.Supplier<Object>) () -> false;
 
-    private static void __pipe(Object readableObj, Object writableObj) {
-        ReadableStream readable = (ReadableStream) readableObj;
-        WritableStream writable = (WritableStream) writableObj;
-        __append(writable, java.util.Arrays.copyOfRange(readable.data, readable.position, readable.data.length));
-        readable.position = readable.data.length;
-        readable.ended = true;
-        __finish(writable);
-        writable.fire("finish");
-        readable.fire("end");
-    }
-
     public static Object pipeImpl = (java.util.function.Function<Object, Object>) (readable) ->
         (java.util.function.Function<Object, Object>) (writable) ->
-            (java.util.function.Supplier<Object>) () -> { __pipe(readable, writable); return null; };
+            (java.util.function.Supplier<Object>) () -> { __pipe((ReadableStream) readable, (WritableStream) writable); return null; };
 
     public static Object pipeCbImpl = (java.util.function.Function<Object, Object>) (readable) ->
         (java.util.function.Function<Object, Object>) (writable) ->
         (java.util.function.Function<Object, Object>) (options) ->
-            (java.util.function.Supplier<Object>) () -> { __pipe(readable, writable); return null; };
+            (java.util.function.Supplier<Object>) () -> { __pipe((ReadableStream) readable, (WritableStream) writable); return null; };
 
     public static Object unpipeImpl = (java.util.function.Function<Object, Object>) (readable) ->
         (java.util.function.Function<Object, Object>) (writable) ->
@@ -134,7 +177,7 @@
         (java.util.function.Supplier<Object>) () -> ((WritableStream) writableObj).corked;
 
     public static Object erroredImpl = (java.util.function.Function<Object, Object>) (stream) ->
-        (java.util.function.Supplier<Object>) () -> false;
+        (java.util.function.Supplier<Object>) () -> ((ReadableStream) stream).error != null;
 
     public static Object writeableFinishedImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Supplier<Object>) () -> ((WritableStream) writableObj).finished;
@@ -150,40 +193,34 @@
 
     public static Object writeImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Function<Object, Object>) (bufferObj) ->
-            (java.util.function.Supplier<Object>) () -> {
-                WritableStream writable = (WritableStream) writableObj;
-                __append(writable, __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) bufferObj));
-                return true;
-            };
+            (java.util.function.Supplier<Object>) () ->
+                __write((WritableStream) writableObj, __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) bufferObj));
 
     public static Object writeCbImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Function<Object, Object>) (bufferObj) ->
         (java.util.function.Function<Object, Object>) (callback) ->
             (java.util.function.Supplier<Object>) () -> {
                 WritableStream writable = (WritableStream) writableObj;
-                __append(writable, __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) bufferObj));
-                Object effect = ((java.util.function.Function<Object, Object>) callback).apply(null);
-                ((java.util.function.Supplier<Object>) effect).get();
-                return true;
+                __write(writable, __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) bufferObj));
+                __callback(callback, writable.error);
+                return null;
             };
 
     public static Object writeStringImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Function<Object, Object>) (string) ->
         (java.util.function.Function<Object, Object>) (encoding) ->
-            (java.util.function.Supplier<Object>) () -> {
-                __append((WritableStream) writableObj, __M$Node_Buffer.__decode((String) string, (String) encoding));
-                return true;
-            };
+            (java.util.function.Supplier<Object>) () ->
+                __write((WritableStream) writableObj, __M$Node_Buffer.__decode((String) string, (String) encoding));
 
     public static Object writeStringCbImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Function<Object, Object>) (string) ->
         (java.util.function.Function<Object, Object>) (encoding) ->
         (java.util.function.Function<Object, Object>) (callback) ->
             (java.util.function.Supplier<Object>) () -> {
-                __append((WritableStream) writableObj, __M$Node_Buffer.__decode((String) string, (String) encoding));
-                Object effect = ((java.util.function.Function<Object, Object>) callback).apply(null);
-                ((java.util.function.Supplier<Object>) effect).get();
-                return true;
+                WritableStream writable = (WritableStream) writableObj;
+                __write(writable, __M$Node_Buffer.__decode((String) string, (String) encoding));
+                __callback(callback, writable.error);
+                return null;
             };
 
     public static Object corkImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
@@ -205,31 +242,33 @@
     public static Object endCbImpl = (java.util.function.Function<Object, Object>) (writableObj) ->
         (java.util.function.Function<Object, Object>) (callback) ->
             (java.util.function.Supplier<Object>) () -> {
-                __finish((WritableStream) writableObj);
-                Object effect = ((java.util.function.Function<Object, Object>) callback).apply(null);
-                ((java.util.function.Supplier<Object>) effect).get();
+                WritableStream writable = (WritableStream) writableObj;
+                __finish(writable);
+                __callback(callback, writable.error);
                 return null;
             };
 
     public static Object destroyImpl = (java.util.function.Function<Object, Object>) (stream) ->
         (java.util.function.Supplier<Object>) () -> {
-            if (stream instanceof WritableStream) ((WritableStream) stream).destroyed = true;
-            else if (stream instanceof ReadableStream) ((ReadableStream) stream).destroyed = true;
+            ((ReadableStream) stream).destroyed = true;
             return null;
         };
 
     public static Object destroyErrorImpl = (java.util.function.Function<Object, Object>) (stream) ->
         (java.util.function.Function<Object, Object>) (error) ->
-            (java.util.function.Supplier<Object>) () -> null;
+            (java.util.function.Supplier<Object>) () -> {
+                ReadableStream readable = (ReadableStream) stream;
+                readable.destroyed = true;
+                readable.error = error;
+                readable.fire("error", error);
+                return null;
+            };
 
     public static Object closedImpl = (java.util.function.Function<Object, Object>) (stream) ->
-        (java.util.function.Supplier<Object>) () -> false;
+        (java.util.function.Supplier<Object>) () -> ((ReadableStream) stream).destroyed;
 
     public static Object destroyedImpl = (java.util.function.Function<Object, Object>) (stream) ->
-        (java.util.function.Supplier<Object>) () ->
-            stream instanceof WritableStream
-                ? ((WritableStream) stream).destroyed
-                : ((ReadableStream) stream).destroyed;
+        (java.util.function.Supplier<Object>) () -> ((ReadableStream) stream).destroyed;
 
     public static Object allowHalfOpenImpl = (java.util.function.Function<Object, Object>) (duplex) ->
         (java.util.function.Supplier<Object>) () -> false;
@@ -239,9 +278,8 @@
         (java.util.function.Function<Object, Object>) (writable) ->
         (java.util.function.Function<Object, Object>) (callback) ->
             (java.util.function.Supplier<Object>) () -> {
-                __pipe(readable, writable);
-                Object effect = ((java.util.function.Function<Object, Object>) callback).apply(null);
-                ((java.util.function.Supplier<Object>) effect).get();
+                __pipe((ReadableStream) readable, (WritableStream) writable);
+                __callback(callback, null);
                 return null;
             };
 
