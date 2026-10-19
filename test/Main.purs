@@ -6,6 +6,7 @@ import Data.Maybe (fromJust, isJust, isNothing)
 import Effect (Effect)
 import Effect.Console (log)
 import Effect.Exception (error)
+import Effect.Ref as Ref
 import Node.Buffer as Buffer
 import Node.Encoding (Encoding(..))
 import Node.EventEmitter (on_)
@@ -37,8 +38,22 @@ main = do
   log "test manual reads"
   testReads
 
+  log "test late data listener"
+  testLateListener
+
 testString :: String
 testString = "üöß💡"
+
+testLateListener :: Effect Unit
+testLateListener = do
+  stream <- newPassThrough
+  void $ writeString stream UTF8 testString
+  received <- Ref.new ""
+  stream # on_ dataH \buf -> do
+    value <- Buffer.toString UTF8 buf
+    Ref.write value received
+  value <- Ref.read received
+  assertEqual value testString
 
 testReads :: Effect Unit
 testReads = do

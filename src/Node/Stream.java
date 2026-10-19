@@ -9,6 +9,28 @@
         public boolean destroyed = false;
         public Object error = null;
         public String encoding = null;
+
+        // Node's streams buffer payload and lifecycle events until a consumer
+        // starts flowing. This backend is eager, so retain a bounded history and
+        // replay it to a listener added later. EventEmitter itself stays
+        // non-replaying; the compatibility rule is scoped to streams.
+        private final java.util.List<Object[]> history = new java.util.ArrayList<>();
+
+        @Override
+        public boolean fire(String name, Object... args) {
+            boolean delivered = super.fire(name, args);
+            history.add(new Object[] { name, args });
+            if (history.size() > 4096) history.remove(0);
+            return delivered;
+        }
+
+        @Override
+        public void addListener(String name, Object listener, boolean prepend) {
+            super.addListener(name, listener, prepend);
+            for (Object[] event : new java.util.ArrayList<>(history)) {
+                if (name.equals(event[0])) invoke(listener, (Object[]) event[1]);
+            }
+        }
     }
 
     public static class WritableStream extends ReadableStream {
@@ -96,19 +118,18 @@
         byte[] pending = java.util.Arrays.copyOfRange(readable.data, readable.position, readable.data.length);
         readable.position = readable.data.length;
         if (pending.length > 0) __write(writable, pending);
-        readable.listeners.computeIfAbsent("data", key -> new java.util.concurrent.CopyOnWriteArrayList<>())
-            .add((java.util.function.Function<Object, Object>) chunk -> (java.util.function.Supplier<Object>) () -> {
+        readable.addListener("data", (java.util.function.Function<Object, Object>) chunk ->
+            (java.util.function.Supplier<Object>) () -> {
                 byte[] bytes = chunk instanceof __M$Node_Buffer.NodeBuffer
                     ? __M$Node_Buffer.__window((__M$Node_Buffer.NodeBuffer) chunk)
                     : __M$Node_Buffer.__decode((String) chunk, "utf8");
                 __write(writable, bytes);
                 return null;
-            });
-        readable.listeners.computeIfAbsent("end", key -> new java.util.concurrent.CopyOnWriteArrayList<>())
-            .add((java.util.function.Function<Object, Object>) ignored -> (java.util.function.Supplier<Object>) () -> {
-                __finish(writable);
-                return null;
-            });
+            }, false);
+        readable.addListener("end", (java.util.function.Supplier<Object>) () -> {
+            __finish(writable);
+            return null;
+        }, false);
     }
 
     public static Object readChunkImpl = (java.util.function.Function<Object, Object>) (left) ->
