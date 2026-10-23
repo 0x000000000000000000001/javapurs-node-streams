@@ -2,6 +2,16 @@
     // exposes the bytes it holds, a writable appends to its target, and pipes
     // are listeners on the "data"/"end" events, which keeps the synchronous
     // effects of this backend observably ordered like the Node ones.
+    private static final class StreamEvent {
+        final String name;
+        final Object[] arguments;
+
+        StreamEvent(String name, Object[] arguments) {
+            this.name = name;
+            this.arguments = arguments;
+        }
+    }
+
     public static class ReadableStream extends __M$Node_EventEmitter.EmitterBase {
         public byte[] data = new byte[0];
         public int position = 0;
@@ -14,12 +24,12 @@
         // starts flowing. This backend is eager, so retain a bounded history and
         // replay it to a listener added later. EventEmitter itself stays
         // non-replaying; the compatibility rule is scoped to streams.
-        private final java.util.List<Object[]> history = new java.util.ArrayList<>();
+        private final java.util.List<StreamEvent> history = new java.util.ArrayList<>();
 
         @Override
         public boolean fire(String name, Object... args) {
             boolean delivered = super.fire(name, args);
-            history.add(new Object[] { name, args });
+            history.add(new StreamEvent(name, args));
             if (history.size() > 4096) history.remove(0);
             return delivered;
         }
@@ -27,8 +37,8 @@
         @Override
         public void addListener(String name, Object listener, boolean prepend) {
             super.addListener(name, listener, prepend);
-            for (Object[] event : new java.util.ArrayList<>(history)) {
-                if (name.equals(event[0])) invoke(listener, (Object[]) event[1]);
+            for (StreamEvent event : new java.util.ArrayList<>(history)) {
+                if (name.equals(event.name)) invoke(listener, event.arguments);
             }
         }
     }
